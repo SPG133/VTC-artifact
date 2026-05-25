@@ -25,6 +25,7 @@ from slora.server.router.abort_req_queue import AbortReqQueue
 from slora.server.router.cluster_req_queue import ClusterReqQueue
 from slora.server.router.vtc_max_req_queue import VTCMaxReqQueue
 from slora.server.router.vtc_req_queue import VTCReqQueue
+from slora.server.router.vtc_pause_req_queue import VTCPauseReqQueue
 from slora.server.router.vtc_pred_len_req_queue import VTCLenPredictReqQueue
 from slora.server.router.vtc_oracle_req_queue import VTCOracleReqQueue
 from slora.server.router.lcf_req_queue import LCFReqQueue
@@ -46,6 +47,16 @@ def get_scheduler(input_params, adapter_dirs):
         return VTCReqQueue(input_params.max_total_token_num, input_params.batch_max_tokens,
                            input_params.running_max_req_size, adapter_dirs,
                            input_params.fair_weights, input_params.cost_func)
+    elif input_params.scheduler == "vtc_pause":
+        return VTCPauseReqQueue(
+            input_params.max_total_token_num,
+            input_params.batch_max_tokens,
+            input_params.running_max_req_size,
+            adapter_dirs,
+            input_params.fair_weights,
+            input_params.cost_func,
+            input_params.victim_min_ratio_to_need,
+        )
     elif input_params.scheduler == "vtc_len_predict":
         return VTCLenPredictReqQueue(
                 input_params.max_total_token_num, input_params.batch_max_tokens,
@@ -291,6 +302,10 @@ class RouterManager:
         return
 
     async def _prefill_batch(self, batch, minibatch=True):
+        start_ts = time.time()
+        for req in batch.reqs:
+            req.total_wait_time = max(0.0, start_ts - req.enqueue_ts)
+            req.last_start_ts = start_ts
         await self._init_batch(batch)
         rets = [self.model_rpcs[tp_rank].prefill_batch(batch.batch_id) for tp_rank in range(self.world_size)]
         ans = await asyncio.gather(*rets)
@@ -337,6 +352,14 @@ class RouterManager:
     async def _handle_finish_req(self, batch: Batch, has_new_finished_req, minibatch=False):
         if has_new_finished_req:
             self.req_queue.update_counter(batch)
+            now = time.time()
+            for req in batch.reqs:
+                if req.has_generate_finished:
+                    req.finish_ts = now
+                    if req.last_start_ts > 0:
+                        req.last_execution_time = max(1e-6, req.finish_ts - req.last_start_ts)
+                    else:
+                        req.last_execution_time = 1e-6
             batch.filter_finished()
 
             # unmerge adapter from base model
@@ -435,6 +458,7 @@ def start_router_process(args, router_port, detokenization_port, model_rpc_ports
                                rate_limit=args.rate_limit,
                                predict_range=args.predict_range,
                                cost_func=args.cost_func,
+                               victim_min_ratio_to_need=args.victim_min_ratio_to_need,
                               )
 
     try:

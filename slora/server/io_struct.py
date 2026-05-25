@@ -1,6 +1,7 @@
 from .sampling_params import SamplingParams
 from typing import Dict, List, Optional, Tuple
 import asyncio
+import time
 
 
 class Req:
@@ -15,6 +16,11 @@ class Req:
         self.output_metadata_list = []
         self.has_generate_finished = False
         self.aborted = False
+        self.enqueue_ts = time.time()
+        self.last_start_ts = 0.0
+        self.finish_ts = 0.0
+        self.last_execution_time = 0.0
+        self.total_wait_time = 0.0
 
     def to_rpc_obj(self):
         return {"adapter_dir": self.adapter_dir,

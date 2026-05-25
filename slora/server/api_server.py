@@ -373,6 +373,7 @@ def main():
     parser.add_argument("--predict-range", type=float, default=0)
     parser.add_argument("--cost-func", type=str, default="linear",
                         choices=["linear", "profile"])
+    parser.add_argument("--victim-min-ratio-to-need", type=float, default=5.0)
 
     # debug parameters
     # do not use no-lora-swap, does not rule out the swap over MemAllocator

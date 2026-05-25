@@ -20,6 +20,7 @@ if __name__ == "__main__":
     parser.add_argument("--predict-range", type=float, default=0)
     parser.add_argument("--cost-func", type=str, default="linear",
                         choices=["linear", "profile"])
+    parser.add_argument("--victim-min-ratio-to-need", type=float, default=5.0)
     args = parser.parse_args()
 
     base_model = BASE_MODEL[args.model_setting]
@@ -39,6 +40,7 @@ if __name__ == "__main__":
     if args.rate_limit is not None:
         cmd += f" --rate-limit {args.rate_limit}"
     cmd += f" --predict-range {args.predict_range}"
+    cmd += f" --victim-min-ratio-to-need {args.victim_min_ratio_to_need}"
 
     num_iter = args.num_adapter // len(adapter_dirs) + 1
     for i in range(num_iter):
