@@ -16,17 +16,27 @@ class Req:
         self.output_metadata_list = []
         self.has_generate_finished = False
         self.aborted = False
+        # 记录请求进入系统的时刻，后续等待比例基于它计算。
         self.enqueue_ts = time.time()
+        # 最近一次真正开始执行（prefill）的时刻。
         self.last_start_ts = 0.0
+        # 完成时刻。
         self.finish_ts = 0.0
+        # 最后一次开始执行到完成之间的执行时间。
         self.last_execution_time = 0.0
+        # 当前定义下的等待时间：开始执行时刻减去入队时刻。
         self.total_wait_time = 0.0
 
     def to_rpc_obj(self):
+        # 被抢占后重新入队的请求，不是从零开始，而是把
+        # “原始 prompt + 已生成 token” 重新拼成新的输入做重算。
+        cur_input_ids = self.prompt_ids + self.output_ids
+        # 剩余输出长度 = 原始输出预算 - 已生成输出长度。
+        remain_output_len = max(1, self.max_output_len - len(self.output_ids))
         return {"adapter_dir": self.adapter_dir,
                 "request_id": self.request_id,
-                "input_id": self.prompt_ids,
-                "output_len": self.max_output_len,
+                "input_id": cur_input_ids,
+                "output_len": remain_output_len,
                 "sampling_param": self.sample_params.to_dict() }
 
     def to_req_detokenization_state(self):

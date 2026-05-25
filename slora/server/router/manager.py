@@ -48,6 +48,8 @@ def get_scheduler(input_params, adapter_dirs):
                            input_params.running_max_req_size, adapter_dirs,
                            input_params.fair_weights, input_params.cost_func)
     elif input_params.scheduler == "vtc_pause":
+        # vtc_pause 使用你定义的“两条件策略”来决定是否允许新请求
+        # 借助抢占 running batch 中的强势任务来重算让位。
         return VTCPauseReqQueue(
             input_params.max_total_token_num,
             input_params.batch_max_tokens,
@@ -276,6 +278,11 @@ class RouterManager:
                 self.send_to_detokenization.send_pyobj(BatchAbortReq(self.req_queue.abort_req_list))
                 self.req_queue.reset_abort_list()
             if new_mini_batch is not None:
+                pause_reqs = []
+                if hasattr(self.req_queue, "pop_pause_reqs"):
+                    pause_reqs = self.req_queue.pop_pause_reqs()
+                if pause_reqs:
+                    await self._preempt_running_reqs(pause_reqs)
                 self.stats_tool.count_prompt_tokens(new_mini_batch)
 
                 if not self.input_params.no_lora:
@@ -304,6 +311,7 @@ class RouterManager:
     async def _prefill_batch(self, batch, minibatch=True):
         start_ts = time.time()
         for req in batch.reqs:
+            # 一旦请求真正开始进入 prefill，就固定它的等待时间。
             req.total_wait_time = max(0.0, start_ts - req.enqueue_ts)
             req.last_start_ts = start_ts
         await self._init_batch(batch)
@@ -333,8 +341,10 @@ class RouterManager:
         await self._handle_finish_req(batch, has_new_finished_req)
         return
 
-    async def _filter_batch(self, batch: Batch):
-        req_id_list = [r.request_id for r in batch.reqs]
+    async def _filter_batch(self, batch: Batch, req_id_list=None):
+        if req_id_list is None:
+            req_id_list = [r.request_id for r in batch.reqs]
+        # 这里把“当前 batch 里哪些 request 保留”同步给模型侧，用于把 victim 真正移出运行批次。
         rets = [self.model_rpcs[tp_rank].filter_batch(batch.batch_id, req_id_list) for tp_rank in range(self.world_size)]
         await asyncio.gather(*rets)
         return
@@ -355,6 +365,7 @@ class RouterManager:
             now = time.time()
             for req in batch.reqs:
                 if req.has_generate_finished:
+                    # 完成时记录执行时间，给平均等待比例的加权更新使用。
                     req.finish_ts = now
                     if req.last_start_ts > 0:
                         req.last_execution_time = max(1e-6, req.finish_ts - req.last_start_ts)
@@ -392,6 +403,30 @@ class RouterManager:
 
             self.running_batch = None
             return
+
+    async def _preempt_running_reqs(self, pause_reqs: List[Req]):
+        if self.running_batch is None or len(pause_reqs) == 0:
+            return
+
+        pause_ids = {req.request_id for req in pause_reqs}
+        remain_reqs = [req for req in self.running_batch.reqs if req.request_id not in pause_ids]
+
+        if len(remain_reqs) == 0:
+            await self._remove_batch(self.running_batch)
+            self.running_batch = None
+        else:
+            remain_ids = [req.request_id for req in remain_reqs]
+            # 先在模型侧缩掉 victim，再在 router 侧同步 running_batch 结构。
+            await self._filter_batch(self.running_batch, remain_ids)
+            self.running_batch.reqs = remain_reqs
+            self.running_batch.id_to_reqs = {req.request_id: req for req in remain_reqs}
+            self.running_batch.adapter_dirs = set(req.adapter_dir for req in remain_reqs)
+
+        if hasattr(self.req_queue, "requeue_preempted_reqs"):
+            # victim 不走独立 paused/recover 状态机，而是重新回到 waiting queue，
+            # 后续通过重新 prefill 的方式恢复上下文。
+            self.req_queue.requeue_preempted_reqs(pause_reqs)
+        return
     
     def _add_token_id_to_req(self, batch: Batch, req_ans):
         for req_id, (new_token_id, new_gen_metadata) in req_ans.items():
